@@ -1,0 +1,10 @@
+module = CAN_UART_TO_CAN
+module-str = can_uart_to_can
+
+config CAN_UART_TO_CAN
+    bool "Enable can_uart_to_can driver"
+    default y
+	depends on DT_HAS_POWERLABS_UART_TO_CAN_ENABLED
+    select UART
+    help
+        Enable can_uart_to_can driver

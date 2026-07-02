@@ -1,0 +1,13 @@
+compatible: "powerlabs,uart-to-can"
+
+description: |
+    This binding provides a UART-to-CAN bridge for use in Zephyr.
+    
+include: can-controller.yaml
+
+properties:
+  uart_device:
+    description: |
+      The UART device to use for the UART-to-CAN bridge.
+    type: phandle
+    required: true
