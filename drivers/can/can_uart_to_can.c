@@ -514,11 +514,15 @@ static void process_data_uart_data(const struct device *uart_to_can_dev) {
       err = parse_can_message_29bit(uart_to_can_dev, &data->rx_ring_buffer,
                                     &frame);
       break;
-
     case 't':
     case 'T':
       if (ring_buf_get_char_to_uint(&data->rx_ring_buffer, 2, 16, &temp_uint)) {
         response = (uint8_t)(temp_uint & 0xFF);
+      }
+      if (response == 0xFF){
+        // error occured which should not happen
+        LOG_ERR("Error sending CAN message, there must be an error in the driver leading to the filling of the mailbox of the uart to can");
+        //! Should we clear tx callback queue?
       }
       if (k_msgq_get(&data->tx_callback_fifo, &callback_msg, K_NO_WAIT) != 0) {
         LOG_ERR("No call back registered to send data to can callback");
@@ -537,6 +541,8 @@ static void process_data_uart_data(const struct device *uart_to_can_dev) {
         //* 0 in event represent no event so we send 0xFF instead
         if (response == 0) {
           response = 0xFF;
+        } else if (response == 0xFF) {
+          response = 0x80;
         }
         k_event_set(&data->sem_event, response);
       }
