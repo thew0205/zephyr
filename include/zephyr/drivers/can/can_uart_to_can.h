@@ -89,12 +89,12 @@ struct uart_to_can_data {
 	/** Message queue used to queue up messages to be sent over CAN.*/
 	struct k_msgq can_tx_mail_box;
 	/** Storage for the Tx callback message queue */
-	char can_tx_mail_box_buffer[4 * sizeof(struct uart_message *)];
+	char can_tx_mail_box_buffer[UART_TO_CAN_NO_MAIL_BOX * sizeof(struct uart_message *)];
 
 	/** Memory slab used to allocate memory for CAN messages.*/
 	struct k_mem_slab can_tx_slab;
   	/** Storage for the CAN messages */
-	char __aligned(4)can_tx_slab_buffer[4 * sizeof(struct uart_message)];
+	char __aligned(4)can_tx_slab_buffer[UART_TO_CAN_NO_MAIL_BOX * sizeof(struct uart_message)];
 
 	/** Current message being processed */
 	struct uart_message * current_msg;

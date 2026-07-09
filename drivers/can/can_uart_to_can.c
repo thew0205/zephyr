@@ -7,6 +7,7 @@
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/toolchain.h>
 #include <zephyr/types.h>
+#include "zephyr/sys/__assert.h"
 
 #include <assert.h>
 #include <stddef.h>
@@ -423,7 +424,6 @@ uart_to_can_send_serial_synchronous(const struct device *uart_to_can_dev,
   k_event_clear(&data->sem_event, 0xFF);
   err = send_uart(uart_to_can_dev, msg, msg_len, timeout);
   if (err != (int)msg_len) {
-
     err = -ENODEV;
     goto uart_to_can_send_serial_synchronous_return;
   }
@@ -514,15 +514,15 @@ static void process_data_uart_data(const struct device *uart_to_can_dev) {
       err = parse_can_message_29bit(uart_to_can_dev, &data->rx_ring_buffer,
                                     &frame);
       break;
+
     case 't':
     case 'T':
       if (ring_buf_get_char_to_uint(&data->rx_ring_buffer, 2, 16, &temp_uint)) {
         response = (uint8_t)(temp_uint & 0xFF);
       }
-      if (response == 0xFF){
-        // error occured which should not happen
-        LOG_ERR("Error sending CAN message, there must be an error in the driver leading to the filling of the mailbox of the uart to can");
-        //! Should we clear tx callback queue?
+      __ASSERT(err!=0xFF, "Something went really wrong with can send");
+      if( response == 0xFF){
+        LOG_ERR("Something went really wrong with can send");
       }
       if (k_msgq_get(&data->tx_callback_fifo, &callback_msg, K_NO_WAIT) != 0) {
         LOG_ERR("No call back registered to send data to can callback");
@@ -541,8 +541,6 @@ static void process_data_uart_data(const struct device *uart_to_can_dev) {
         //* 0 in event represent no event so we send 0xFF instead
         if (response == 0) {
           response = 0xFF;
-        } else if (response == 0xFF) {
-          response = 0x80;
         }
         k_event_set(&data->sem_event, response);
       }
@@ -796,6 +794,7 @@ static int uart_to_can_send(const struct device *uart_to_can_dev,
   err = send_uart_internal_no_blocking(uart_to_can_dev, msg_ptr);
   if (err == 0) {
     err = k_msgq_put(&data->tx_callback_fifo, &callback_msg, K_NO_WAIT);
+    __ASSERT(err ==0, "Failed to put callback in queue");
   }
   irq_unlock(key);
 
@@ -857,14 +856,14 @@ static int uart_to_can_init(const struct device *dev) {
   }
 
   k_msgq_init(&data->tx_callback_fifo, data->tx_callback_fifo_buffer,
-              sizeof(struct tx_callback_ctx), 3);
+              sizeof(struct tx_callback_ctx), UART_TO_CAN_NO_MAIL_BOX);
 
   k_msgq_init(&data->can_tx_mail_box, data->can_tx_mail_box_buffer,
-              sizeof(struct uart_message *), 5);
+              sizeof(struct uart_message *), UART_TO_CAN_NO_MAIL_BOX);
   k_event_init(&data->sem_event);
 
   k_mem_slab_init(&data->can_tx_slab, &data->can_tx_slab_buffer,
-                  sizeof(struct uart_message), 5);
+                  sizeof(struct uart_message), UART_TO_CAN_NO_MAIL_BOX);
   data->current_msg = NULL;
   data->current_msg_idx = 0;
 
