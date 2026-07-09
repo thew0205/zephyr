@@ -103,13 +103,19 @@ struct uart_to_can_data {
 	
 	/** Semaphore event used to signal when a message response has been received with the response return value. */
 	struct k_event sem_event;
+
+
+
+	struct k_mutex inst_mutex;
+
+	struct can_driver_data common;
 };
 
 
-/** Reset the external UART to CAN device. 
- * @param dev Pointer to the UART to CAN device
- * @return 0 on success, -1 on failure
- */
-int uart_to_can_reset(const struct device *uart_to_can_dev);
+// /** Reset the external UART to CAN device. 
+//  * @param dev Pointer to the UART to CAN device
+//  * @return 0 on success, -1 on failure
+//  */
+// int uart_to_can_reset(const struct device *uart_to_can_dev);
 
 #endif /* _UART_TO_CAN_H_ */

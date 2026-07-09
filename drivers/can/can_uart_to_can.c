@@ -504,12 +504,12 @@ static void process_data_uart_data(const struct device *uart_to_can_dev)
 
 		switch (command) {
 		case 'r':
-			LOG_INF("Send data to standard 11 bit CAN");
+			LOG_DBG("Send data to standard 11 bit CAN");
 			err = parse_can_message_11bit(uart_to_can_dev, &data->rx_ring_buffer,
 						      &frame);
 			break;
 		case 'R':
-			LOG_INF("Send data to standard 29 bit CAN");
+			LOG_DBG("Send data to standard 29 bit CAN");
 			err = parse_can_message_29bit(uart_to_can_dev, &data->rx_ring_buffer,
 						      &frame);
 			break;
@@ -638,28 +638,38 @@ static void uart_cb_handler(const struct device *uart_dev, void *app_data)
 	}
 }
 
-int uart_to_can_reset(const struct device *uart_to_can_dev)
+static int uart_to_can_reset(const struct device *uart_to_can_dev)
 {
+	// TODO(Matthew): Make better
 	const struct uart_to_can_config *config =
 		(const struct uart_to_can_config *)uart_to_can_dev->config;
 	const struct device *uart_dev = config->uart_dev;
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
 	const char *msg = "L\r";
+	int err;
 	int msg_len = strlen(msg);
 
 	struct uart_message *temp_msg_ptr;
 
+	err = k_mutex_lock(&data->inst_mutex, K_MSEC(100));
+	if (err != 0) {
+		LOG_ERR("Failed to lock the mutex in uart_to_can_reset");
+		goto uart_to_can_reset_return;
+	}
 	uart_irq_rx_disable(uart_dev);
 	uart_irq_tx_disable(uart_dev);
 	uart_to_can_serial_rx_fifo_drain(uart_to_can_dev);
 	while (k_msgq_get(&data->can_tx_mail_box, &temp_msg_ptr, K_NO_WAIT) == 0) {
 		k_mem_slab_free(&data->can_tx_slab, temp_msg_ptr);
 	}
-	int err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
+	err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
 
 	uart_irq_rx_disable(uart_dev);
 	uart_irq_tx_disable(uart_dev);
 
+	k_mutex_unlock(&data->inst_mutex);
+
+uart_to_can_reset_return:
 	return err;
 }
 
@@ -669,11 +679,21 @@ static int uart_to_can_start(const struct device *uart_to_can_dev)
 		(const struct uart_to_can_config *)uart_to_can_dev->config;
 	const struct device *uart_dev = config->uart_dev;
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
-
+	int err;
+	if (data->common.started) {
+		err = -EALREADY;
+		goto uart_to_can_start_return;
+	}
 	const char *msg = "O\r";
 	int msg_len = strlen(msg);
 
 	struct uart_message *temp_msg_ptr;
+
+	err = k_mutex_lock(&data->inst_mutex, K_MSEC(100));
+	if (err != 0) {
+		LOG_ERR("Failed to lock the mutex in uart_to_can_start");
+		goto uart_to_can_start_return;
+	}
 
 	uart_irq_rx_disable(uart_dev);
 	uart_irq_tx_disable(uart_dev);
@@ -682,11 +702,13 @@ static int uart_to_can_start(const struct device *uart_to_can_dev)
 		k_mem_slab_free(&data->can_tx_slab, temp_msg_ptr);
 	}
 
-	int err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
+	err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
+	if (err == 0) {
+		data->common.started = true;
+	}
+	k_mutex_unlock(&data->inst_mutex);
 
-	// if (err == 0) {
-	// 	set_to_recv_asynchronous_mode(uart_to_can_dev);
-	// }
+uart_to_can_start_return:
 	return err;
 }
 
@@ -695,7 +717,7 @@ static int uart_to_can_add_rx_filter(const struct device *uart_to_can_dev,
 				     const struct can_filter *filter)
 {
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
-
+	int err;
 	char buffer[1 + 16 + 1];
 	if (filter->flags & CAN_EXT_ID_MASK) {
 		buffer[0] = 'M';
@@ -708,20 +730,27 @@ static int uart_to_can_add_rx_filter(const struct device *uart_to_can_dev,
 
 	// const char *msg = "M0000001000000001\r";
 
-	int err = uart_to_can_send_serial_synchronous(uart_to_can_dev, buffer, 18, K_MSEC(100));
+	err = k_mutex_lock(&data->inst_mutex, K_MSEC(100));
+	if (err != 0) {
+		LOG_ERR("Failed to lock the mutex in uart_to_can_add_rx_filter");
+		goto uart_to_can_add_rx_filter_return;
+	}
+	err = uart_to_can_send_serial_synchronous(uart_to_can_dev, buffer, 18, K_MSEC(100));
 
 	if (err >= 0) {
 		data->rx_cb[err].callback = callback;
 		data->rx_cb[err].user_data = user_data;
 	}
+	k_mutex_unlock(&data->inst_mutex);
 
+uart_to_can_add_rx_filter_return:
 	return err;
 }
 
 static void uart_to_can_remove_rx_filter(const struct device *uart_to_can_dev, int filter_id)
 {
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
-
+	int err;
 	if (filter_id >= (int)(sizeof(data->rx_cb) / sizeof(data->rx_cb[0])) ||
 	    data->rx_cb[filter_id].callback == NULL) {
 		goto uart_to_can_remove_rx_filter_return;
@@ -732,15 +761,23 @@ static void uart_to_can_remove_rx_filter(const struct device *uart_to_can_dev, i
 	assert(snprintf(&buffer[1], 3, "%02x", filter_id) == 2);
 	buffer[3] = COMMAND_RESPONSE_OKAY[0];
 
-	int err = uart_to_can_send_serial_synchronous(uart_to_can_dev, buffer, 4, K_MSEC(100));
+	err = k_mutex_lock(&data->inst_mutex, K_MSEC(100));
+	if (err != 0) {
+		LOG_ERR("Failed to lock the mutex in uart_to_can_remove_rx_filter");
+		goto uart_to_can_remove_rx_filter_return;
+	}
+	err = uart_to_can_send_serial_synchronous(uart_to_can_dev, buffer, 4, K_MSEC(100));
 
 	if (err < 0) {
-		goto uart_to_can_remove_rx_filter_return;
+		goto uart_to_can_remove_rx_filter_unlock_mutex;
 	}
 	if (data->rx_cb[filter_id].callback != NULL) {
 		data->rx_cb[filter_id].callback = NULL;
 		data->rx_cb[filter_id].user_data = NULL;
 	}
+uart_to_can_remove_rx_filter_unlock_mutex:
+	k_mutex_unlock(&data->inst_mutex);
+
 uart_to_can_remove_rx_filter_return:
 	return;
 }
@@ -750,13 +787,17 @@ static int uart_to_can_send(const struct device *uart_to_can_dev, const struct c
 {
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
 	struct tx_callback_ctx callback_msg;
+    int err;
+	if (!data->common.started) {
+		err = -ENODEV;
+		goto uart_to_can_send_return;
+	}
 
 	callback_msg.callback = callback;
 	callback_msg.user_data = user_data;
 
 	struct uart_message *msg_ptr;
 
-	int err;
 	k_timepoint_t end_time = sys_timepoint_calc(timeout);
 
 	while ((k_msgq_num_free_get(&data->tx_callback_fifo) < 1)
@@ -765,34 +806,39 @@ static int uart_to_can_send(const struct device *uart_to_can_dev, const struct c
 		k_msleep(10);
 	}
 
+	err = k_mutex_lock(&data->inst_mutex, K_MSEC(100));
+	if (err != 0) {
+		LOG_ERR("Failed to lock the mutex in uart_to_can_send");
+		goto uart_to_can_send_return;
+	}
+
 	if (k_msgq_num_free_get(&data->tx_callback_fifo) < 1) {
 		err = -ENODEV;
-		goto uart_to_can_send_return;
+		goto uart_to_can_send_unlock_mutex;
 	}
 
 	timeout = sys_timepoint_timeout(end_time);
 	err = k_mem_slab_alloc(&data->can_tx_slab, (void **)&msg_ptr, timeout);
 
 	if (err != 0) {
-		goto uart_to_can_send_return;
+		goto uart_to_can_send_unlock_mutex;
 	}
 
 	*msg_ptr = can_frame_to_uart_message(frame);
 
-	// 1. Lock all system interrupts and save the current state
-	unsigned int key = irq_lock();
 
 	err = send_uart_internal_no_blocking(uart_to_can_dev, msg_ptr);
 	if (err == 0) {
 		err = k_msgq_put(&data->tx_callback_fifo, &callback_msg, K_NO_WAIT);
 		__ASSERT(err == 0, "Failed to put callback in queue");
 	}
-	irq_unlock(key);
 
 	if (err != 0) {
 		k_mem_slab_free(&data->can_tx_slab, msg_ptr);
-		goto uart_to_can_send_return;
+		goto uart_to_can_send_unlock_mutex;
 	}
+uart_to_can_send_unlock_mutex:
+	k_mutex_unlock(&data->inst_mutex);
 
 uart_to_can_send_return:
 	return err;
@@ -800,28 +846,47 @@ uart_to_can_send_return:
 
 static int uart_to_can_stop(const struct device *uart_to_can_dev)
 {
+	// TODO(Matthew):
 	const struct uart_to_can_config *config =
 		(const struct uart_to_can_config *)uart_to_can_dev->config;
 	const struct device *uart_dev = config->uart_dev;
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
+	int err;
 
 	struct uart_message *temp_msg_ptr;
+  	if (!data->common.started) {
+		err = -ENODEV;
+		goto uart_to_can_stop_return;
+	}
 
-	uart_to_can_serial_rx_fifo_drain(uart_to_can_dev);
-	while (k_msgq_get(&data->can_tx_mail_box, &temp_msg_ptr, K_NO_WAIT) == 0) {
-		k_mem_slab_free(&data->can_tx_slab, temp_msg_ptr);
-		// TODO
+	struct tx_callback_ctx callback_msg;
+	err = k_mutex_lock(&data->inst_mutex, K_MSEC(100));
+	if (err != 0) {
+		LOG_ERR("Failed to lock the mutex in uart_to_can_stop");
+		goto uart_to_can_stop_return;
 	}
 
 	const char *msg = "C\r";
 	int msg_len = strlen(msg);
-	int err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
+	err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
 
 	if (err == 0) {
 		uart_irq_rx_disable(uart_dev);
 		uart_irq_tx_disable(uart_dev);
-	}
 
+		while (k_msgq_get(&data->tx_callback_fifo, &callback_msg, K_NO_WAIT) == 0) {
+			callback_msg.callback(uart_to_can_dev, -ENETDOWN, callback_msg.user_data);
+		}
+
+		uart_to_can_serial_rx_fifo_drain(uart_to_can_dev);
+		while (k_msgq_get(&data->can_tx_mail_box, &temp_msg_ptr, K_NO_WAIT) == 0) {
+			k_mem_slab_free(&data->can_tx_slab, temp_msg_ptr);
+			// TODO
+		}
+		data->common.started = false;
+	}
+	k_mutex_unlock(&data->inst_mutex);
+uart_to_can_stop_return:
 	return 0;
 }
 
@@ -854,6 +919,8 @@ static int uart_to_can_init(const struct device *dev)
 
 	k_mem_slab_init(&data->can_tx_slab, &data->can_tx_slab_buffer, sizeof(struct uart_message),
 			UART_TO_CAN_NO_MAIL_BOX);
+	k_mutex_init(&data->inst_mutex);
+	data->common.started = false;
 	data->current_msg = NULL;
 	data->current_msg_idx = 0;
 
