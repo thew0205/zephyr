@@ -20,7 +20,7 @@
 
 LOG_MODULE_REGISTER(can_uart_to_can, CONFIG_CAN_LOG_LEVEL);
 
-#define DT_DRV_COMPAT powerlabs_uart_to_can
+#define DT_DRV_COMPAT                   powerlabs_uart_to_can
 #define UART_TO_CAN_ASYNC_RX_TIMEOUT_US 2000
 
 static void process_data_uart_data(const struct device *uart_to_can_dev);
@@ -373,8 +373,8 @@ static int uart_to_can_rx_enable(const struct device *uart_to_can_dev)
 
 		data->next_async_rx_buf_idx = 1;
 		err = uart_rx_enable(uart_dev, data->uart_async_rx_buf[0],
-				    UART_TO_CAN_ASYNC_RX_BUF_SIZE,
-				    UART_TO_CAN_ASYNC_RX_TIMEOUT_US);
+				     UART_TO_CAN_ASYNC_RX_BUF_SIZE,
+				     UART_TO_CAN_ASYNC_RX_TIMEOUT_US);
 		if (err == 0) {
 			data->async_rx_enabled = true;
 		}
@@ -437,7 +437,7 @@ static void uart_to_can_async_tx_start_next(const struct device *uart_to_can_dev
 }
 
 static void uart_to_can_handle_rx_bytes(const struct device *uart_to_can_dev, const uint8_t *bytes,
-					 size_t len)
+					size_t len)
 {
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
 	uint32_t written;
@@ -465,8 +465,7 @@ static int send_uart_internal_no_blocking(const struct device *uart_to_can_dev,
 	int err;
 	if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
 		if (data->current_msg == NULL) {
-			err = uart_tx(uart_dev, msg_ptr->buffer, msg_ptr->buffer_size,
-				      10000);
+			err = uart_tx(uart_dev, msg_ptr->buffer, msg_ptr->buffer_size, 10000);
 			if (err == 0) {
 				data->current_msg = msg_ptr;
 				goto send_uart_internal_return;
@@ -570,7 +569,7 @@ static void uart_cb_async_handler(const struct device *uart_dev, struct uart_eve
 		return;
 	}
 
-	switch (evt->type) { 
+	switch (evt->type) {
 	case UART_TX_DONE:
 		if (data->current_msg != NULL) {
 			k_mem_slab_free(&data->can_tx_slab, (void *)data->current_msg);
@@ -586,13 +585,13 @@ static void uart_cb_async_handler(const struct device *uart_dev, struct uart_eve
 		uart_to_can_async_tx_start_next(uart_to_can_dev);
 		break;
 	case UART_RX_RDY:
-		uart_to_can_handle_rx_bytes(uart_to_can_dev,
-					 &evt->data.rx.buf[evt->data.rx.offset],
-					 evt->data.rx.len);
+		uart_to_can_handle_rx_bytes(uart_to_can_dev, &evt->data.rx.buf[evt->data.rx.offset],
+					    evt->data.rx.len);
 		break;
 	case UART_RX_BUF_REQUEST: {
 		uint8_t idx = data->next_async_rx_buf_idx;
-		uart_rx_buf_rsp(uart_dev, data->uart_async_rx_buf[idx], UART_TO_CAN_ASYNC_RX_BUF_SIZE);
+		uart_rx_buf_rsp(uart_dev, data->uart_async_rx_buf[idx],
+				UART_TO_CAN_ASYNC_RX_BUF_SIZE);
 		data->next_async_rx_buf_idx = (idx + 1U) % 2U;
 		break;
 	}
@@ -921,7 +920,7 @@ static int uart_to_can_send(const struct device *uart_to_can_dev, const struct c
 {
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
 	struct tx_callback_ctx callback_msg;
-    int err;
+	int err;
 	if (!data->common.started) {
 		err = -ENODEV;
 		goto uart_to_can_send_return;
@@ -960,12 +959,13 @@ static int uart_to_can_send(const struct device *uart_to_can_dev, const struct c
 
 	*msg_ptr = can_frame_to_uart_message(frame);
 
-
+	unsigned int key = irq_lock();
 	err = send_uart_internal_no_blocking(uart_to_can_dev, msg_ptr);
 	if (err == 0) {
 		err = k_msgq_put(&data->tx_callback_fifo, &callback_msg, K_NO_WAIT);
 		__ASSERT(err == 0, "Failed to put callback in queue");
 	}
+	irq_unlock(key);
 
 	if (err != 0) {
 		k_mem_slab_free(&data->can_tx_slab, msg_ptr);
@@ -988,7 +988,7 @@ static int uart_to_can_stop(const struct device *uart_to_can_dev)
 	int err;
 
 	struct uart_message *temp_msg_ptr;
-  	if (!data->common.started) {
+	if (!data->common.started) {
 		err = -ENODEV;
 		goto uart_to_can_stop_return;
 	}
