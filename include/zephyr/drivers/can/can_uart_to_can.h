@@ -13,6 +13,7 @@
 
 #define CAN_ID_11_BIT_BYTE_LENGHT 3
 #define CAN_ID_29_BIT_BYTE_LENGHT 8
+#define UART_TO_CAN_ASYNC_RX_BUF_SIZE 32
 
 /** @brief Size of the buffer needed to receive a message over UART.
  * 1 for \S
@@ -100,6 +101,12 @@ struct uart_to_can_data {
 	struct uart_message * current_msg;
 	/** Index of the current message */
 	int current_msg_idx;
+	/** UART async next RX buffer index */
+	uint8_t next_async_rx_buf_idx;
+	/** UART async RX enabled state */
+	bool async_rx_enabled;
+	/** UART async double buffer storage */
+	uint8_t uart_async_rx_buf[2][UART_TO_CAN_ASYNC_RX_BUF_SIZE];
 	
 	/** Semaphore event used to signal when a message response has been received with the response return value. */
 	struct k_event sem_event;

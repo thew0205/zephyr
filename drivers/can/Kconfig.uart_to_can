@@ -8,3 +8,10 @@ config CAN_UART_TO_CAN
     select UART
     help
         Enable can_uart_to_can driver
+
+config CAN_UART_TO_CAN_ASYNC_API
+    bool "Use UART asynchronous API in can_uart_to_can"
+    depends on CAN_UART_TO_CAN && UART_ASYNC_API
+    help
+      Use UART asynchronous API for can_uart_to_can.
+      When disabled, can_uart_to_can uses UART interrupt-driven API.

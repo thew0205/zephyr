@@ -21,6 +21,9 @@
 LOG_MODULE_REGISTER(can_uart_to_can, CONFIG_CAN_LOG_LEVEL);
 
 #define DT_DRV_COMPAT powerlabs_uart_to_can
+#define UART_TO_CAN_ASYNC_RX_TIMEOUT_US 2000
+
+static void process_data_uart_data(const struct device *uart_to_can_dev);
 
 static inline uint8_t ring_buf_get_char(struct ring_buf *buf)
 {
@@ -354,6 +357,103 @@ static void uart_to_can_serial_rx_fifo_drain(const struct device *uart_to_can_de
 	ring_buf_reset(&data->rx_ring_buffer);
 }
 
+static int uart_to_can_rx_enable(const struct device *uart_to_can_dev)
+{
+	const struct uart_to_can_config *config =
+		(const struct uart_to_can_config *)uart_to_can_dev->config;
+	const struct device *uart_dev = config->uart_dev;
+	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
+
+	if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+		int err;
+
+		if (data->async_rx_enabled) {
+			return 0;
+		}
+
+		data->next_async_rx_buf_idx = 1;
+		err = uart_rx_enable(uart_dev, data->uart_async_rx_buf[0],
+				    UART_TO_CAN_ASYNC_RX_BUF_SIZE,
+				    UART_TO_CAN_ASYNC_RX_TIMEOUT_US);
+		if (err == 0) {
+			data->async_rx_enabled = true;
+		}
+
+		return err;
+	}
+
+	uart_irq_rx_enable(uart_dev);
+	return 0;
+}
+
+static int uart_to_can_rx_disable(const struct device *uart_to_can_dev)
+{
+	const struct uart_to_can_config *config =
+		(const struct uart_to_can_config *)uart_to_can_dev->config;
+	const struct device *uart_dev = config->uart_dev;
+	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
+
+	if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+		int err;
+
+		if (!data->async_rx_enabled) {
+			return 0;
+		}
+
+		err = uart_rx_disable(uart_dev);
+		if (err == 0) {
+			data->async_rx_enabled = false;
+		}
+
+		return err;
+	}
+
+	uart_irq_rx_disable(uart_dev);
+	return 0;
+}
+
+static void uart_to_can_async_tx_start_next(const struct device *uart_to_can_dev)
+{
+	const struct uart_to_can_config *config =
+		(const struct uart_to_can_config *)uart_to_can_dev->config;
+	const struct device *uart_dev = config->uart_dev;
+	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
+	struct uart_message *next_msg;
+	int err;
+
+	err = k_msgq_get(&data->can_tx_mail_box, &next_msg, K_NO_WAIT);
+	if (err != 0) {
+		return;
+	}
+
+	err = uart_tx(uart_dev, next_msg->buffer, next_msg->buffer_size, 1000);
+	if (err == 0) {
+		data->current_msg = next_msg;
+		return;
+	}
+
+	(void)k_msgq_put(&data->can_tx_mail_box, &next_msg, K_NO_WAIT);
+	LOG_ERR("uart_tx failed with %d", err);
+}
+
+static void uart_to_can_handle_rx_bytes(const struct device *uart_to_can_dev, const uint8_t *bytes,
+					 size_t len)
+{
+	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
+	uint32_t written;
+
+	if (len == 0) {
+		return;
+	}
+
+	written = ring_buf_put(&data->rx_ring_buffer, bytes, len);
+	if (written < len) {
+		LOG_WRN("RX ring buffer overflow (%u/%u)", written, len);
+	}
+
+	process_data_uart_data(uart_to_can_dev);
+}
+
 static int send_uart_internal_no_blocking(const struct device *uart_to_can_dev,
 					  struct uart_message *msg_ptr)
 {
@@ -363,13 +463,22 @@ static int send_uart_internal_no_blocking(const struct device *uart_to_can_dev,
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
 
 	int err;
-	if (IS_ENABLED(CONFIG_MODBUS_SERIAL_ASYNC_API)) {
-		err = uart_tx(uart_dev, msg_ptr->buffer, msg_ptr->buffer_size, 100);
-		if (err == -EBUSY) {
-			err = k_msgq_put(&data->can_tx_mail_box, &msg_ptr, K_NO_WAIT);
-			if (err != 0) {
+	if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+		if (data->current_msg == NULL) {
+			err = uart_tx(uart_dev, msg_ptr->buffer, msg_ptr->buffer_size,
+				      10000);
+			if (err == 0) {
+				data->current_msg = msg_ptr;
 				goto send_uart_internal_return;
 			}
+			if (err != -EBUSY) {
+				goto send_uart_internal_return;
+			}
+		}
+
+		err = k_msgq_put(&data->can_tx_mail_box, &msg_ptr, K_NO_WAIT);
+		if (err != 0) {
+			goto send_uart_internal_return;
 		}
 	} else {
 		err = k_msgq_put(&data->can_tx_mail_box, &msg_ptr, K_NO_WAIT);
@@ -416,8 +525,12 @@ static int uart_to_can_send_serial_synchronous(const struct device *uart_to_can_
 	const struct device *uart_dev = config->uart_dev;
 	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
 	int err = data->current_msg_idx;
-	// uint32_t events;
-	uart_irq_rx_enable(uart_dev);
+	ARG_UNUSED(uart_dev);
+
+	err = uart_to_can_rx_enable(uart_to_can_dev);
+	if (err != 0) {
+		return err;
+	}
 
 	// int64_t start_time = k_uptime_get();
 	k_timepoint_t end = sys_timepoint_calc(timeout);
@@ -444,49 +557,52 @@ uart_to_can_send_serial_synchronous_return:
 	return err;
 }
 
-// static void uart_cb_async_handler(const struct device *uart_dev,
-//                                   struct uart_event *evt, void *app_data) {
-//   const struct device *uart_to_can_dev = (struct device *)app_data;
-//   const struct uart_to_can_config *config =
-//       (const struct uart_to_can_config *)uart_to_can_dev->config;
-//   struct uart_to_can_data *data =
-//       (struct uart_to_can_data *)uart_to_can_dev->data;
+static void uart_cb_async_handler(const struct device *uart_dev, struct uart_event *evt,
+				  void *app_data)
+{
+	const struct device *uart_to_can_dev = (const struct device *)app_data;
+	const struct uart_to_can_config *config =
+		(const struct uart_to_can_config *)uart_to_can_dev->config;
+	struct uart_to_can_data *data = (struct uart_to_can_data *)uart_to_can_dev->data;
 
-//   if (uart_to_can_dev == NULL || config->uart_dev != uart_dev) {
-//     LOG_ERR("Uart to can device is not properly initialized");
-//     return;
-//   }
-//   int bytes_copied;
+	if (uart_to_can_dev == NULL || config->uart_dev != uart_dev) {
+		LOG_ERR("Uart to can device is not properly initialized");
+		return;
+	}
 
-//   switch (evt->type) {
-//   case UART_TX_DONE:
-//     // data->uart_buf_recv_ctr = 0;
-//     break;
-//   case UART_RX_RDY:
-//     // data->uart_buf_recv_ctr = evt->data.rx.len;
-//     // k_work_submit(&ctx->server_work);
-//     bytes_copied = copy_data_to_ring_buf(&data->rx_ring_buffer,
-//                                          &evt->data.rx.buf[evt->data.rx.offset],
-//                                          evt->data.rx.len);
-//     if (bytes_copied < 0) {
-//       LOG_ERR("Error with copying data to ring buf");
-//     }
-//     break;
-//   case UART_TX_ABORTED:
-//     __fallthrough;
-//   case UART_RX_STOPPED:
-//     __fallthrough;
-//   case UART_RX_BUF_REQUEST:
-//     __fallthrough;
-//   case UART_RX_BUF_RELEASED:
-//     __fallthrough;
-//   case UART_RX_DISABLED:
-//     break;
-//   default:
-//     LOG_WRN("Unhandled UART event type: %d", evt->type);
-//     break;
-//   }
-// }
+	switch (evt->type) { 
+	case UART_TX_DONE:
+		if (data->current_msg != NULL) {
+			k_mem_slab_free(&data->can_tx_slab, (void *)data->current_msg);
+			data->current_msg = NULL;
+		}
+		uart_to_can_async_tx_start_next(uart_to_can_dev);
+		break;
+	case UART_TX_ABORTED:
+		if (data->current_msg != NULL) {
+			k_mem_slab_free(&data->can_tx_slab, (void *)data->current_msg);
+			data->current_msg = NULL;
+		}
+		uart_to_can_async_tx_start_next(uart_to_can_dev);
+		break;
+	case UART_RX_RDY:
+		uart_to_can_handle_rx_bytes(uart_to_can_dev,
+					 &evt->data.rx.buf[evt->data.rx.offset],
+					 evt->data.rx.len);
+		break;
+	case UART_RX_BUF_REQUEST: {
+		uint8_t idx = data->next_async_rx_buf_idx;
+		uart_rx_buf_rsp(uart_dev, data->uart_async_rx_buf[idx], UART_TO_CAN_ASYNC_RX_BUF_SIZE);
+		data->next_async_rx_buf_idx = (idx + 1U) % 2U;
+		break;
+	}
+	case UART_RX_DISABLED:
+		data->async_rx_enabled = false;
+		break;
+	default:
+		break;
+	}
+}
 
 static void process_data_uart_data(const struct device *uart_to_can_dev)
 {
@@ -495,7 +611,7 @@ static void process_data_uart_data(const struct device *uart_to_can_dev)
 
 	int err = -1;
 	// char response = 0;
-	uint8_t response;
+	uint8_t response = 0;
 	unsigned long temp_uint = ring_buf_size_get(&data->rx_ring_buffer);
 	//   struct uart_message uart_message;
 	struct can_frame frame;
@@ -656,16 +772,26 @@ static int uart_to_can_reset(const struct device *uart_to_can_dev)
 		LOG_ERR("Failed to lock the mutex in uart_to_can_reset");
 		goto uart_to_can_reset_return;
 	}
-	uart_irq_rx_disable(uart_dev);
-	uart_irq_tx_disable(uart_dev);
+	(void)uart_to_can_rx_disable(uart_to_can_dev);
+	if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+		(void)uart_tx_abort(uart_dev);
+		if (data->current_msg != NULL) {
+			k_mem_slab_free(&data->can_tx_slab, (void *)data->current_msg);
+			data->current_msg = NULL;
+		}
+	} else {
+		uart_irq_tx_disable(uart_dev);
+	}
 	uart_to_can_serial_rx_fifo_drain(uart_to_can_dev);
 	while (k_msgq_get(&data->can_tx_mail_box, &temp_msg_ptr, K_NO_WAIT) == 0) {
 		k_mem_slab_free(&data->can_tx_slab, temp_msg_ptr);
 	}
 	err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
 
-	uart_irq_rx_disable(uart_dev);
-	uart_irq_tx_disable(uart_dev);
+	(void)uart_to_can_rx_disable(uart_to_can_dev);
+	if (!IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+		uart_irq_tx_disable(uart_dev);
+	}
 
 	k_mutex_unlock(&data->inst_mutex);
 
@@ -695,8 +821,16 @@ static int uart_to_can_start(const struct device *uart_to_can_dev)
 		goto uart_to_can_start_return;
 	}
 
-	uart_irq_rx_disable(uart_dev);
-	uart_irq_tx_disable(uart_dev);
+	(void)uart_to_can_rx_disable(uart_to_can_dev);
+	if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+		(void)uart_tx_abort(uart_dev);
+		if (data->current_msg != NULL) {
+			k_mem_slab_free(&data->can_tx_slab, (void *)data->current_msg);
+			data->current_msg = NULL;
+		}
+	} else {
+		uart_irq_tx_disable(uart_dev);
+	}
 	uart_to_can_serial_rx_fifo_drain(uart_to_can_dev);
 	while (k_msgq_get(&data->can_tx_mail_box, &temp_msg_ptr, K_NO_WAIT) == 0) {
 		k_mem_slab_free(&data->can_tx_slab, temp_msg_ptr);
@@ -871,8 +1005,16 @@ static int uart_to_can_stop(const struct device *uart_to_can_dev)
 	err = uart_to_can_send_serial_synchronous(uart_to_can_dev, msg, msg_len, K_MSEC(100));
 
 	if (err == 0) {
-		uart_irq_rx_disable(uart_dev);
-		uart_irq_tx_disable(uart_dev);
+		(void)uart_to_can_rx_disable(uart_to_can_dev);
+		if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+			(void)uart_tx_abort(uart_dev);
+			if (data->current_msg != NULL) {
+				k_mem_slab_free(&data->can_tx_slab, (void *)data->current_msg);
+				data->current_msg = NULL;
+			}
+		} else {
+			uart_irq_tx_disable(uart_dev);
+		}
 
 		while (k_msgq_get(&data->tx_callback_fifo, &callback_msg, K_NO_WAIT) == 0) {
 			callback_msg.callback(uart_to_can_dev, -ENETDOWN, callback_msg.user_data);
@@ -923,11 +1065,19 @@ static int uart_to_can_init(const struct device *dev)
 	data->common.started = false;
 	data->current_msg = NULL;
 	data->current_msg_idx = 0;
+	data->next_async_rx_buf_idx = 0;
+	data->async_rx_enabled = false;
 
-	//   if (IS_ENABLED(CONFIG_UART_TO_CAN_ASYNC_API)) {
-	//     err = uart_callback_set(uart_dev, uart_cb_async_handler, (void *)dev);
-	//   } else {
-	err = uart_irq_callback_user_data_set(uart_dev, uart_cb_handler, (void *)dev);
+	if (IS_ENABLED(CONFIG_CAN_UART_TO_CAN_ASYNC_API)) {
+		err = uart_callback_set(uart_dev, uart_cb_async_handler, (void *)dev);
+	} else {
+		err = uart_irq_callback_user_data_set(uart_dev, uart_cb_handler, (void *)dev);
+	}
+
+	if (err != 0) {
+		LOG_ERR("Failed to set UART callback (err %d)", err);
+		return err;
+	}
 
 	err = uart_to_can_reset(dev);
 	err = uart_to_can_reset(dev);
